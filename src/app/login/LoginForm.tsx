@@ -103,24 +103,14 @@ export function LoginForm() {
         ) : (
           <div className="mt-8 flex flex-col gap-3">
             {oauthList.map((provider) => (
-              provider.id === "github" ? (
-                <a
-                  key={provider.id}
-                  href={`https://geshizhuanhuan-three.vercel.app/api/auth/signin/github?callbackUrl=${encodeURIComponent(callbackUrl)}`}
-                  className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition ${providerButtonClass(provider.id)}`}
-                >
-                  {providerLabel(provider.id, provider.name)}
-                </a>
-              ) : (
-                <button
-                  key={provider.id}
-                  type="button"
-                  className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition ${providerButtonClass(provider.id)}`}
-                  onClick={() => void signIn(provider.id, { callbackUrl })}
-                >
-                  {providerLabel(provider.id, provider.name)}
-                </button>
-              )
+              <button
+                key={provider.id}
+                type="button"
+                className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition ${providerButtonClass(provider.id)}`}
+                onClick={() => void signIn(provider.id, { callbackUrl })}
+              >
+                {providerLabel(provider.id, provider.name)}
+              </button>
             ))}
           </div>
         )}
