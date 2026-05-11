@@ -773,7 +773,7 @@ export default function Home() {
             <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
               <p className="text-xs uppercase text-slate-400">Engine</p>
               <p className="mt-1 text-sm text-slate-200">
-                {workerReady ? "FFmpeg worker ready (SharedArrayBuffer)" : "Loading…"}
+                {workerReady ? "FFmpeg worker ready" : "Loading…"}
               </p>
             </div>
           </div>
