@@ -1,72 +1,55 @@
-export type Plan = "guest" | "pro";
+export type Plan = "free" | "pro" | "max";
 
 const KEY_PLAN = "uc_plan_v1";
-const KEY_QUOTA = "uc_quota_v1";
+/** Public-facing tier key (requested for integrations). Kept in sync with KEY_PLAN. */
+export const KEY_USER_TIER = "user_tier";
 
-const GUEST_MAX_BYTES = 5 * 1024 * 1024;
-const PRO_MAX_BYTES = 100 * 1024 * 1024;
-const GUEST_DAILY_CONVERSIONS = 3;
+const FREE_MAX_BYTES = 100 * 1024 * 1024;
+const PRO_MAX_BYTES = 500 * 1024 * 1024;
+const MAX_MAX_BYTES = Number.MAX_SAFE_INTEGER;
 
-type QuotaRecord = { date: string; used: number };
-
-function todayKey() {
-  return new Date().toISOString().slice(0, 10);
-}
-
+/** Demo / offline fallback only — signed-in users use server session (`effectivePlan`). */
 export function getPlan(): Plan {
-  if (typeof window === "undefined") return "guest";
-  const v = localStorage.getItem(KEY_PLAN);
-  return v === "pro" ? "pro" : "guest";
+  if (typeof window === "undefined") return "free";
+  const v =
+    localStorage.getItem(KEY_PLAN) ?? localStorage.getItem(KEY_USER_TIER);
+  if (v === "max") return "max";
+  return v === "pro" ? "pro" : "free";
 }
 
 export function setPlan(plan: Plan) {
   if (typeof window === "undefined") return;
   localStorage.setItem(KEY_PLAN, plan);
+  const tier = plan === "free" ? "free" : plan;
+  localStorage.setItem(KEY_USER_TIER, tier);
 }
 
+export function getMaxFileBytesForPlan(tier: Plan): number {
+  if (tier === "max") return MAX_MAX_BYTES;
+  if (tier === "pro") return PRO_MAX_BYTES;
+  return FREE_MAX_BYTES;
+}
+
+/** Prefer passing explicit plan from session when authenticated. */
 export function getMaxFileBytes(): number {
-  return getPlan() === "pro" ? PRO_MAX_BYTES : GUEST_MAX_BYTES;
+  const tier = getPlan();
+  return getMaxFileBytesForPlan(tier);
 }
 
-/** Remaining conversion credits today (guest only). Pro returns a large sentinel for display. */
 export function getRemainingConversionsToday(): number {
-  if (getPlan() === "pro") return 999;
-  const key = todayKey();
-  const raw = localStorage.getItem(KEY_QUOTA);
-  let used = 0;
-  if (raw) {
-    try {
-      const q = JSON.parse(raw) as QuotaRecord;
-      if (q.date === key) used = q.used;
-    } catch {
-      used = 0;
-    }
-  }
-  return Math.max(0, GUEST_DAILY_CONVERSIONS - used);
+  return 999;
 }
 
-/** Returns false if guest exceeded daily limit. */
 export function consumeConversions(count: number): boolean {
   if (count <= 0) return true;
-  if (getPlan() === "pro") return true;
-  const key = todayKey();
-  const raw = localStorage.getItem(KEY_QUOTA);
-  let used = 0;
-  if (raw) {
-    try {
-      const q = JSON.parse(raw) as QuotaRecord;
-      if (q.date === key) used = q.used;
-    } catch {
-      used = 0;
-    }
-  }
-  const next = used + count;
-  if (next > GUEST_DAILY_CONVERSIONS) return false;
-  const record: QuotaRecord = { date: key, used: next };
-  localStorage.setItem(KEY_QUOTA, JSON.stringify(record));
   return true;
 }
 
+export function isProTier(tier: Plan): boolean {
+  return tier === "pro" || tier === "max";
+}
+
 export function isPro(): boolean {
-  return getPlan() === "pro";
+  const tier = getPlan();
+  return isProTier(tier);
 }

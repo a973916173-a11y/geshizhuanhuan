@@ -31,6 +31,8 @@ const getExt = (name: string) => {
   return idx > -1 ? name.slice(idx + 1).toLowerCase() : "dat";
 };
 
+const AUDIO_OUT = new Set(["mp3", "wav", "aac", "ogg", "flac", "m4a", "opus", "aiff", "aif"]);
+
 const getVideoArgs = (
   outputExt: string,
   videoPreset: ConvertPayload["videoPreset"]
@@ -74,6 +76,68 @@ const getVideoArgs = (
   ];
 };
 
+function buildFfmpegCommand(
+  kind: ConvertPayload["kind"],
+  inputName: string,
+  outputName: string,
+  outputExt: string,
+  videoPreset: ConvertPayload["videoPreset"]
+): string[] {
+  if (kind === "video" && AUDIO_OUT.has(outputExt)) {
+    if (outputExt === "mp3") {
+      return ["-i", inputName, "-vn", "-acodec", "libmp3lame", "-q:a", "2", outputName];
+    }
+    if (outputExt === "wav") {
+      return ["-i", inputName, "-vn", "-acodec", "pcm_s16le", "-ar", "44100", outputName];
+    }
+    if (outputExt === "aac") {
+      return ["-i", inputName, "-vn", "-acodec", "aac", "-b:a", "192k", outputName];
+    }
+    if (outputExt === "ogg") {
+      return ["-i", inputName, "-vn", "-acodec", "libvorbis", "-q:a", "6", outputName];
+    }
+    if (outputExt === "flac") {
+      return ["-i", inputName, "-vn", "-acodec", "flac", outputName];
+    }
+    if (outputExt === "m4a") {
+      return ["-i", inputName, "-vn", "-acodec", "aac", "-b:a", "192k", outputName];
+    }
+    if (outputExt === "opus") {
+      return ["-i", inputName, "-vn", "-c:a", "libopus", "-b:a", "128k", outputName];
+    }
+    if (outputExt === "aiff" || outputExt === "aif") {
+      return ["-i", inputName, "-vn", "-c:a", "pcm_s16be", outputName];
+    }
+  }
+
+  if (kind === "video" && outputExt === "gif") {
+    return [
+      "-i",
+      inputName,
+      "-vf",
+      "fps=12,scale=-1:480:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=128[p];[s1][p]paletteuse=dither=bayer",
+      "-loop",
+      "0",
+      outputName,
+    ];
+  }
+
+  if (kind === "video") {
+    return ["-i", inputName, ...getVideoArgs(outputExt, videoPreset), outputName];
+  }
+
+  if (kind === "audio") {
+    if (outputExt === "opus") {
+      return ["-i", inputName, "-c:a", "libopus", "-b:a", "128k", outputName];
+    }
+    if (outputExt === "aiff" || outputExt === "aif") {
+      return ["-i", inputName, "-c:a", "pcm_s16be", outputName];
+    }
+  }
+
+  return ["-i", inputName, outputName];
+}
+
 const ensureLoaded = async () => {
   if (isLoaded) {
     return;
@@ -110,10 +174,7 @@ worker.onmessage = async (event: MessageEvent<WorkerRequest>) => {
     ffmpeg.on("progress", onProgress);
 
     await ffmpeg.writeFile(inputName, await fetchFile(new Blob([fileBuffer])));
-    const command =
-      kind === "video"
-        ? ["-i", inputName, ...getVideoArgs(outputExt, videoPreset), outputName]
-        : ["-i", inputName, outputName];
+    const command = buildFfmpegCommand(kind, inputName, outputName, outputExt, videoPreset);
     await ffmpeg.exec(command);
     const output = await ffmpeg.readFile(outputName);
     await ffmpeg.deleteFile(inputName);
@@ -130,4 +191,3 @@ worker.onmessage = async (event: MessageEvent<WorkerRequest>) => {
     post({ type: "error", id: activeId, message });
   }
 };
-

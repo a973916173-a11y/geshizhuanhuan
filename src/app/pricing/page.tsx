@@ -2,70 +2,84 @@
 
 import Link from "next/link";
 import { Check, Sparkles } from "lucide-react";
+import { useSession } from "next-auth/react";
 import { useState } from "react";
+import { AdShell } from "@/components/AdShell";
 import { PaymentModal } from "@/components/PaymentModal";
-import { setPlan } from "@/lib/membership";
 
 const tiers = [
   {
     name: "Free",
     price: "$0",
-    period: "永久",
-    desc: "轻度试用",
-    features: ["单文件最大 5MB", "每日 3 次转换", "基础格式转换"],
-    cta: "当前方案",
+    period: "forever",
+    desc: "Try it out",
+    features: [
+      "Unlimited conversions",
+      "Up to 100MB per file",
+      "Basic processing speed",
+      "Batch up to 5 files",
+    ],
+    cta: "Current plan",
     highlighted: false,
     action: "current" as const,
+    tier: "pro" as const,
   },
   {
-    name: "Basic",
-    price: "$9",
-    period: "/月",
-    desc: "个人创作者",
-    features: ["单文件最高 100MB", "更高每日配额（演示）", "优先格式支持"],
-    cta: "选择 Basic",
+    name: "Pro",
+    price: "$2.00",
+    period: "/mo",
+    desc: "Creators & everyday use",
+    features: ["Up to 500MB per file", "Batch up to 10 files", "Standard priority speed"],
+    cta: "Upgrade to Pro",
     highlighted: false,
     action: "upgrade" as const,
+    tier: "pro" as const,
   },
   {
-    name: "Unlimited",
-    price: "$19",
-    period: "/月",
-    desc: "团队与重度用户",
-    features: ["100MB 单文件上限", "PDF 批量合并", "高清视频转码", "全部 Pro 功能"],
-    cta: "Upgrade to Pro",
+    name: "Max",
+    price: "$5.00",
+    period: "/mo",
+    desc: "Power users",
+    features: ["Unlimited file size", "Unlimited batch size", "Highest priority speed", "Everything in Pro"],
+    cta: "Upgrade to Max",
     highlighted: true,
     action: "upgrade" as const,
+    tier: "max" as const,
   },
 ];
 
 export default function PricingPage() {
+  const { update } = useSession();
   const [modalOpen, setModalOpen] = useState(false);
+  const [selectedTier, setSelectedTier] = useState<"pro" | "max">("pro");
 
-  const handleSimulatePro = () => {
-    setPlan("pro");
+  const handleUnlock = async (_tier: "pro" | "max") => {
+    void _tier;
+    await update();
   };
 
   return (
-    <div className="min-h-screen bg-[#06080f] px-4 py-16 text-white sm:px-6 lg:px-8">
+    <>
       <PaymentModal
         open={modalOpen}
         onClose={() => setModalOpen(false)}
-        onSimulateSuccess={handleSimulatePro}
+        selectedTier={selectedTier}
+        onProUnlocked={handleUnlock}
       />
 
-      <div className="mx-auto max-w-6xl">
+      <AdShell>
+      <div className="mx-auto max-w-6xl pt-6">
         <div className="text-center">
           <p className="text-sm font-medium uppercase tracking-[0.2em] text-sky-400">Pricing</p>
-          <h1 className="mt-3 text-4xl font-bold tracking-tight sm:text-5xl">选择适合你的方案</h1>
+          <h1 className="mt-3 text-4xl font-bold tracking-tight sm:text-5xl">Plans that fit how you work</h1>
           <p className="mx-auto mt-4 max-w-2xl text-lg text-slate-400">
-            参考 Convertio 风格的三档定价。支付为本地模拟，用于演示商业化流程。
+            Free, Pro, and Max — start free and upgrade when you need more.
           </p>
           <Link
             href="/"
             className="mt-8 inline-flex items-center gap-2 rounded-full border border-white/20 px-5 py-2 text-sm text-slate-300 transition hover:border-white/40 hover:text-white"
           >
-            ← 返回转换器
+            ← Back to Goldfish Format Converter
           </Link>
         </div>
 
@@ -82,7 +96,7 @@ export default function PricingPage() {
               {tier.highlighted ? (
                 <div className="absolute -top-3 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-full bg-sky-500 px-3 py-1 text-xs font-semibold text-slate-950">
                   <Sparkles className="h-3 w-3" />
-                  最受欢迎
+                  Most popular
                 </div>
               ) : null}
               <h2 className="text-xl font-semibold">{tier.name}</h2>
@@ -110,7 +124,10 @@ export default function PricingPage() {
               ) : (
                 <button
                   type="button"
-                  onClick={() => setModalOpen(true)}
+                  onClick={() => {
+                    setSelectedTier(tier.tier);
+                    setModalOpen(true);
+                  }}
                   className={`mt-8 w-full rounded-xl py-3 text-sm font-semibold transition ${
                     tier.highlighted
                       ? "bg-sky-500 text-slate-950 hover:bg-sky-400"
@@ -124,6 +141,7 @@ export default function PricingPage() {
           ))}
         </div>
       </div>
-    </div>
+      </AdShell>
+    </>
   );
 }

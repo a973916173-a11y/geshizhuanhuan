@@ -1,21 +1,39 @@
 "use client";
 
+import { AdShell } from "@/components/AdShell";
 import { PaymentModal } from "@/components/PaymentModal";
-import { downloadBlob, mimeForOutput } from "@/lib/download";
+import {
+  downloadBlob,
+  mimeForOutput,
+  pickSaveDirectory,
+  saveBlobToDirectory,
+  supportsDirectoryPicker,
+} from "@/lib/download";
+import { buildAcceptAttribute } from "@/lib/accept-string";
+import {
+  ALL_OFFICE_INPUTS,
+  AUDIO_INPUTS,
+  defaultOutputExtension,
+  detectOfficeSubtype,
+  IMAGE_INPUTS,
+  outputGroupsForKind,
+  PDF_INPUTS,
+  type MediaKind,
+  type OfficeSubtype,
+  VIDEO_INPUTS,
+} from "@/lib/format-registry";
 import {
   consumeConversions,
-  getMaxFileBytes,
+  getMaxFileBytesForPlan,
   getPlan,
-  getRemainingConversionsToday,
   setPlan as savePlanToStorage,
   type Plan,
 } from "@/lib/membership";
-import { PDFDocument } from "pdf-lib";
-import JSZip from "jszip";
 import {
   Download,
   FileAudio2,
   FileImage,
+  FileSpreadsheet,
   FileText,
   FileVideo,
   Layers,
@@ -24,11 +42,27 @@ import {
   Zap,
 } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { signOut, useSession } from "next-auth/react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-type MediaKind = "image" | "audio" | "video" | "pdf";
+type PdfOperation = "convert" | "split" | "extract-images" | "to-docx";
 type ConvertStatus = "queued" | "converting" | "success" | "error";
 type VideoQualityPreset = "fast" | "standard" | "high";
+type PaidTier = "pro" | "max";
+
+const PDF_TOOL_OPTIONS: { value: PdfOperation; label: string }[] = [
+  { value: "convert", label: "Keep / convert to PDF" },
+  { value: "split", label: "Split pages → ZIP (one PDF per page)" },
+  { value: "extract-images", label: "Extract pages → ZIP (PNG screenshots)" },
+  { value: "to-docx", label: "Rebuild as Word (.docx)" },
+];
+
+function pdfToolOutputExt(op: PdfOperation): string {
+  if (op === "split" || op === "extract-images") return "zip";
+  if (op === "to-docx") return "docx";
+  return "pdf";
+}
 type WorkerMessage =
   | { type: "ready" }
   | { type: "progress"; id: string; progress: number }
@@ -39,30 +73,16 @@ type Item = {
   id: string;
   file: File;
   kind: MediaKind;
+  /** Target extension or container (e.g. zip, html, docx). */
   outputExt: string;
+  officeSubtype?: OfficeSubtype;
+  pdfOperation?: PdfOperation;
   status: ConvertStatus;
   progress: number;
   previewUrl?: string;
   convertedBlob?: Blob;
   error?: string;
 };
-
-const IMAGE_INPUTS = ["jpg", "jpeg", "png", "webp", "gif", "bmp", "avif", "svg", "tiff"] as const;
-const AUDIO_INPUTS = ["mp3", "wav", "aac", "ogg"] as const;
-const VIDEO_INPUTS = ["mp4", "webm", "mov", "mkv"] as const;
-const PDF_INPUTS = ["pdf"] as const;
-
-const IMAGE_OUTPUTS = ["jpg", "png", "webp", "avif", "bmp", "gif", "tiff", "pdf"] as const;
-const AUDIO_OUTPUTS = ["mp3", "wav", "aac", "ogg"] as const;
-const VIDEO_OUTPUTS = ["mp4", "webm", "mov"] as const;
-const PDF_OUTPUTS = ["pdf"] as const;
-
-const ACCEPTS = [
-  ...IMAGE_INPUTS,
-  ...AUDIO_INPUTS,
-  ...VIDEO_INPUTS,
-  ...PDF_INPUTS,
-].map((e) => `.${e}`);
 
 const toId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 const extOf = (name: string) => {
@@ -74,6 +94,9 @@ const renameExt = (name: string, ext: string) => {
   const base = i > 0 ? name.slice(0, i) : name;
   return `${base}.${ext}`;
 };
+
+/** Default JPEG/WebP quality when encoding images in-browser (no batch UI). */
+const DEFAULT_IMAGE_ENCODE_QUALITY = 0.92;
 const size = (bytes: number) => {
   if (bytes <= 0) return "0 B";
   const u = ["B", "KB", "MB", "GB"];
@@ -90,25 +113,16 @@ async function sniffPdfMagic(file: File): Promise<boolean> {
 
 const detectKindByName = (file: File): MediaKind | null => {
   const ext = extOf(file.name);
-  if (IMAGE_INPUTS.includes(ext as (typeof IMAGE_INPUTS)[number])) return "image";
-  if (AUDIO_INPUTS.includes(ext as (typeof AUDIO_INPUTS)[number])) return "audio";
-  if (VIDEO_INPUTS.includes(ext as (typeof VIDEO_INPUTS)[number])) return "video";
-  if (PDF_INPUTS.includes(ext as (typeof PDF_INPUTS)[number])) return "pdf";
+  if ((ALL_OFFICE_INPUTS as readonly string[]).includes(ext)) return "office";
+  if ((IMAGE_INPUTS as readonly string[]).includes(ext)) return "image";
+  if ((AUDIO_INPUTS as readonly string[]).includes(ext)) return "audio";
+  if ((VIDEO_INPUTS as readonly string[]).includes(ext)) return "video";
+  if ((PDF_INPUTS as readonly string[]).includes(ext)) return "pdf";
   return null;
 };
 
-const outputOptionsForKind = (kind: MediaKind) => {
-  if (kind === "image") return IMAGE_OUTPUTS;
-  if (kind === "audio") return AUDIO_OUTPUTS;
-  if (kind === "video") return VIDEO_OUTPUTS;
-  return PDF_OUTPUTS;
-};
-
-const defaultOutputByFile = (file: File, kind: MediaKind) => {
-  const inputExt = extOf(file.name);
-  const options = outputOptionsForKind(kind);
-  return options.find((opt) => opt !== inputExt) ?? options[0];
-};
+const defaultOutputByFile = (file: File, kind: MediaKind, officeSubtype?: OfficeSubtype) =>
+  defaultOutputExtension(extOf(file.name), kind, officeSubtype);
 
 function CircularProgress({ progress }: { progress: number }) {
   const p = Math.min(100, Math.max(0, progress));
@@ -145,6 +159,8 @@ function CircularProgress({ progress }: { progress: number }) {
 }
 
 export default function Home() {
+  const router = useRouter();
+  const { data: session, status: sessionStatus, update: updateSession } = useSession();
   const workerRef = useRef<Worker | null>(null);
   const resolverRef = useRef<Map<string, { resolve: (buf: ArrayBuffer) => void; reject: (err: Error) => void }>>(
     new Map()
@@ -156,23 +172,36 @@ export default function Home() {
   const [isConverting, setIsConverting] = useState(false);
   const [isZipping, setIsZipping] = useState(false);
   const [mergeBusy, setMergeBusy] = useState(false);
+  const [batchProgress, setBatchProgress] = useState(0);
+  const batchCtxRef = useRef<{ total: number; index: number } | null>(null);
   const [videoPreset, setVideoPreset] = useState<VideoQualityPreset>("fast");
-  const [plan, setPlan] = useState<Plan>("guest");
-  const [remainingToday, setRemainingToday] = useState(3);
   const [paymentOpen, setPaymentOpen] = useState(false);
+  const [selectedUpgradeTier, setSelectedUpgradeTier] = useState<PaidTier>("pro");
   const inputRef = useRef<HTMLInputElement>(null);
+  const [outputDirHandle, setOutputDirHandle] = useState<{
+    name?: string;
+    getFileHandle: (
+      name: string,
+      options?: { create?: boolean }
+    ) => Promise<{
+      createWritable: () => Promise<{
+        write: (data: Blob) => Promise<void>;
+        close: () => Promise<void>;
+      }>;
+    }>;
+  } | null>(null);
+  const canPickDirectory = supportsDirectoryPicker();
+
+  const activePlan: Plan = useMemo(() => {
+    if (sessionStatus === "authenticated" && session?.user?.effectivePlan) {
+      return session.user.effectivePlan;
+    }
+    return getPlan();
+  }, [session?.user?.effectivePlan, sessionStatus]);
 
   const refreshMembershipUi = useCallback(() => {
-    setPlan(getPlan());
-    setRemainingToday(getRemainingConversionsToday());
-  }, []);
-
-  useEffect(() => {
-    // Read persisted plan / daily quota after mount (localStorage is not available on the server).
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time sync from localStorage on mount
-    setPlan(getPlan());
-    setRemainingToday(getRemainingConversionsToday());
-  }, []);
+    void updateSession();
+  }, [updateSession]);
 
   useEffect(() => {
     workerRef.current = new Worker(new URL("../workers/ffmpegWorker.ts", import.meta.url), {
@@ -190,6 +219,10 @@ export default function Home() {
         setItems((prev) =>
           prev.map((x) => (x.id === msg.id ? { ...x, progress: msg.progress, status: "converting" } : x))
         );
+        const ctx = batchCtxRef.current;
+        if (ctx) {
+          setBatchProgress(Math.min(100, ((ctx.index + msg.progress / 100) / ctx.total) * 100));
+        }
         return;
       }
       if (msg.type === "done") {
@@ -217,22 +250,27 @@ export default function Home() {
 
   const ensureWorker = async () => {
     if (workerReady) return;
-    if (!workerRef.current) throw new Error("FFmpeg Worker 初始化失败");
+    if (!workerRef.current) throw new Error("FFmpeg worker failed to initialize");
     setEngineLoading(true);
     workerRef.current.postMessage({ type: "init" });
   };
 
-  const maxBytes = getMaxFileBytes();
-  const proUser = plan === "pro";
-  const effectiveVideoPreset: VideoQualityPreset = proUser ? videoPreset : "fast";
+  const maxBytes = getMaxFileBytesForPlan(activePlan);
+  const isFree = activePlan === "free";
+  const isPro = activePlan === "pro";
+  const isMax = activePlan === "max";
+  const isPaid = isPro || isMax;
+  const effectiveVideoPreset: VideoQualityPreset = isMax ? "high" : isPro ? videoPreset : "fast";
 
   const totalDone = items.filter((x) => x.status === "success").length;
   const pdfItems = items.filter((x) => x.kind === "pdf");
 
   const buildItem = async (file: File): Promise<Item | null> => {
-    const limit = getMaxFileBytes();
+    const limit = maxBytes;
     if (file.size > limit) {
-      window.alert(`文件「${file.name}」超过当前套餐上限（${size(limit)}）。请升级 Pro 或压缩文件。`);
+      window.alert(
+        `"${file.name}" exceeds your plan limit (${size(limit)}). Upgrade to Pro/Max or use a smaller file.`
+      );
       return null;
     }
 
@@ -241,16 +279,23 @@ export default function Home() {
       kind = "pdf";
     }
     if (!kind) {
-      window.alert(`无法识别格式：${file.name}`);
+      window.alert(`Unsupported or unknown format: ${file.name}`);
       return null;
+    }
+
+    const ext = extOf(file.name);
+    let officeSubtype: OfficeSubtype | undefined;
+    if (kind === "office") {
+      officeSubtype = detectOfficeSubtype(ext) ?? "word";
     }
 
     if (kind === "pdf") {
       try {
+        const { PDFDocument } = await import("pdf-lib");
         const raw = await file.arrayBuffer();
         await PDFDocument.load(raw);
       } catch {
-        window.alert(`PDF 无法解析或已损坏：${file.name}`);
+        window.alert(`PDF is invalid or corrupted: ${file.name}`);
         return null;
       }
     }
@@ -258,11 +303,15 @@ export default function Home() {
     const previewUrl =
       kind === "image" || kind === "pdf" ? URL.createObjectURL(file) : undefined;
 
+    const pdfOperation: PdfOperation | undefined = kind === "pdf" ? "convert" : undefined;
+
     return {
       id: toId(),
       file,
       kind,
-      outputExt: defaultOutputByFile(file, kind),
+      officeSubtype,
+      pdfOperation,
+      outputExt: defaultOutputByFile(file, kind, officeSubtype),
       status: "queued",
       progress: 0,
       previewUrl,
@@ -284,14 +333,19 @@ export default function Home() {
     e.target.value = "";
   };
 
-  const convertWithWorker = (item: Item, outputExt: string): Promise<ArrayBuffer> =>
+  const convertWithWorker = (
+    item: Item,
+    outputExt: string,
+    fileOverride?: File
+  ): Promise<ArrayBuffer> =>
     new Promise((resolve, reject) => {
       if (!workerRef.current) {
-        reject(new Error("Worker 不可用"));
+        reject(new Error("Worker is not available"));
         return;
       }
       resolverRef.current.set(item.id, { resolve, reject });
-      item.file
+      const src = fileOverride ?? item.file;
+      src
         .arrayBuffer()
         .then((buf) => {
           workerRef.current?.postMessage(
@@ -299,27 +353,33 @@ export default function Home() {
               type: "convert",
               payload: {
                 id: item.id,
-                fileName: item.file.name,
+                fileName: src.name,
                 outputExt,
                 fileBuffer: buf,
-                kind: item.kind,
+                kind:
+                  item.kind === "audio"
+                    ? "audio"
+                    : item.kind === "video"
+                      ? "video"
+                      : item.kind === "pdf"
+                        ? "pdf"
+                        : "image",
                 videoPreset: effectiveVideoPreset,
               },
             },
             [buf]
           );
         })
-        .catch((err) => reject(err instanceof Error ? err : new Error("读取文件失败")));
+        .catch((err) => reject(err instanceof Error ? err : new Error("Failed to read file")));
     });
 
   const imageToPdf = async (file: File): Promise<Blob> => {
+    const { PDFDocument } = await import("pdf-lib");
     const pdf = await PDFDocument.create();
     const bytes = new Uint8Array(await file.arrayBuffer());
     const ext = extOf(file.name);
-    const image =
-      ext === "png" || ext === "apng"
-        ? await pdf.embedPng(bytes)
-        : await pdf.embedJpg(bytes);
+    const useRasterPng = ext === "png" || ext === "apng";
+    const image = useRasterPng ? await pdf.embedPng(bytes) : await pdf.embedJpg(bytes);
     const page = pdf.addPage([image.width, image.height]);
     page.drawImage(image, { x: 0, y: 0, width: image.width, height: image.height });
     const out = await pdf.save();
@@ -328,17 +388,18 @@ export default function Home() {
   };
 
   const mergePdfs = async () => {
-    if (!proUser) {
-      window.alert("PDF 批量合并为 Pro 功能，请先升级。");
+    if (!isPaid) {
+      window.alert("Merging multiple PDFs is a Pro feature. Please upgrade.");
       return;
     }
     const pdfs = items.filter((x) => x.kind === "pdf");
     if (pdfs.length < 2) {
-      window.alert("请至少上传 2 个 PDF 文件后再合并。");
+      window.alert("Add at least two PDF files before merging.");
       return;
     }
     setMergeBusy(true);
     try {
+      const { PDFDocument } = await import("pdf-lib");
       const merged = await PDFDocument.create();
       for (const entry of pdfs) {
         const bytes = await entry.file.arrayBuffer();
@@ -350,28 +411,74 @@ export default function Home() {
       const blob = new Blob([new Uint8Array(out)], { type: "application/pdf" });
       downloadBlob(blob, `merged-${Date.now()}.pdf`);
     } catch (e) {
-      window.alert(e instanceof Error ? e.message : "合并失败");
+      window.alert(e instanceof Error ? e.message : "Merge failed");
     } finally {
       setMergeBusy(false);
     }
   };
 
+  /** Save to chosen folder or trigger browser download (same path as manual Download). */
+  const deliverFileBlob = async (item: Item, blob: Blob, outputExt: string) => {
+    const mime = mimeForOutput(item.kind, outputExt);
+    const finalBlob =
+      blob.type && blob.type !== "application/octet-stream"
+        ? blob
+        : new Blob([blob], { type: mime });
+    const filename = renameExt(item.file.name, outputExt);
+    if (outputDirHandle) {
+      try {
+        await saveBlobToDirectory(finalBlob, filename, outputDirHandle);
+        return;
+      } catch (e) {
+        window.alert(
+          e instanceof Error
+            ? `Could not write to selected folder (${e.message}). Falling back to browser download.`
+            : "Could not write to selected folder. Falling back to browser download."
+        );
+      }
+    }
+    downloadBlob(finalBlob, filename);
+  };
+
+  const triggerDownload = async (item: Item) => {
+    if (!item.convertedBlob) return;
+    await deliverFileBlob(item, item.convertedBlob, item.outputExt);
+  };
+
   const runAll = async () => {
-    const queue = items.filter((x) => x.status === "queued");
+    let queue = items.filter((x) => x.status === "queued");
     if (!queue.length) return;
 
-    if (!proUser) {
-      if (queue.length > remainingToday) {
-        window.alert(`今日剩余转换次数不足（剩余 ${remainingToday} 次，队列 ${queue.length} 个文件）。请明日再来或升级 Pro。`);
-        return;
-      }
+    if (isFree && queue.length > 5) {
+      promptUpgradeToPricing();
+      return;
+    }
+    if (isPro && queue.length > 10) {
+      window.alert(
+        "Pro can process up to 10 files per run — using the first 10. Upgrade to Max for unlimited batch size."
+      );
+      queue = queue.slice(0, 10);
     }
 
     setIsConverting(true);
+    setBatchProgress(0);
+    batchCtxRef.current = { total: queue.length, index: 0 };
     await ensureWorker();
 
-    for (const item of queue) {
+    for (let qi = 0; qi < queue.length; qi++) {
+      const item = queue[qi];
+      batchCtxRef.current = { total: queue.length, index: qi };
+
       const effectiveOutputExt = item.outputExt;
+      const pdfOp = item.pdfOperation ?? "convert";
+
+      const bumpItemProgress = (pct: number) => {
+        setItems((prev) =>
+          prev.map((x) => (x.id === item.id ? { ...x, progress: pct, status: "converting" } : x))
+        );
+        setBatchProgress(Math.min(100, ((qi + pct / 100) / queue.length) * 100));
+      };
+
       setItems((prev) =>
         prev.map((x) =>
           x.id === item.id
@@ -379,46 +486,115 @@ export default function Home() {
             : x
         )
       );
+
       try {
         let blob: Blob;
-        if (item.kind === "pdf" && effectiveOutputExt === "pdf") {
-          blob = new Blob([await item.file.arrayBuffer()], { type: "application/pdf" });
-        } else if (item.kind === "image" && effectiveOutputExt === "pdf") {
-          blob = await imageToPdf(item.file);
+
+        if (item.kind === "office") {
+          const office = await import("@/lib/convert/office");
+          if (item.officeSubtype === "excel") {
+            blob = await office.convertXlsx(
+              item.file,
+              effectiveOutputExt as "html" | "pdf" | "csv",
+              bumpItemProgress
+            );
+          } else if (item.officeSubtype === "text") {
+            blob = await office.convertPlainText(
+              item.file,
+              effectiveOutputExt as "html" | "pdf",
+              bumpItemProgress
+            );
+          } else {
+            blob = await office.convertDocx(
+              item.file,
+              effectiveOutputExt as "html" | "pdf" | "txt",
+              bumpItemProgress
+            );
+          }
+        } else if (item.kind === "pdf") {
+          if (pdfOp === "split") {
+            const pdfTools = await import("@/lib/convert/pdf-tools");
+            blob = await pdfTools.splitPdfToZip(item.file, bumpItemProgress);
+          } else if (pdfOp === "extract-images") {
+            const pdfTools = await import("@/lib/convert/pdf-tools");
+            blob = await pdfTools.extractPdfPagesAsImagesZip(item.file, bumpItemProgress);
+          } else if (pdfOp === "to-docx") {
+            const pdfTools = await import("@/lib/convert/pdf-tools");
+            blob = await pdfTools.pdfToWordLikeDocx(item.file, bumpItemProgress);
+          } else {
+            blob = new Blob([await item.file.arrayBuffer()], { type: "application/pdf" });
+          }
+        } else if (item.kind === "image") {
+          const ip = await import("@/lib/convert/image-process");
+          const canvas = await ip.resolveImageFileToCanvas(item.file);
+
+          if (effectiveOutputExt === "pdf") {
+            const pngFile = new File([await ip.canvasToOutputBlob(canvas, "png", 1)], "page.png", {
+              type: "image/png",
+            });
+            blob = await imageToPdf(pngFile);
+          } else if (effectiveOutputExt === "ico") {
+            const { canvasToIcoBlob } = await import("@/lib/convert/image-decode");
+            blob = await canvasToIcoBlob(canvas);
+          } else if (
+            effectiveOutputExt === "jpg" ||
+            effectiveOutputExt === "png" ||
+            effectiveOutputExt === "webp"
+          ) {
+            blob = await ip.canvasToOutputBlob(
+              canvas,
+              effectiveOutputExt,
+              DEFAULT_IMAGE_ENCODE_QUALITY
+            );
+          } else {
+            const pngFile = new File([await ip.canvasToOutputBlob(canvas, "png", 1)], "frame.png", {
+              type: "image/png",
+            });
+            const outputBuffer = await convertWithWorker(item, effectiveOutputExt, pngFile);
+            blob = new Blob([outputBuffer], {
+              type: mimeForOutput("image", effectiveOutputExt),
+            });
+          }
         } else {
           const outputBuffer = await convertWithWorker(item, effectiveOutputExt);
-          const mime = mimeForOutput(item.kind, effectiveOutputExt);
-          blob = new Blob([outputBuffer], { type: mime });
+          blob = new Blob([outputBuffer], {
+            type: mimeForOutput(item.kind, effectiveOutputExt),
+          });
         }
+
         setItems((prev) =>
           prev.map((x) =>
             x.id === item.id
-              ? { ...x, outputExt: effectiveOutputExt, convertedBlob: blob, progress: 100, status: "success" }
+              ? {
+                  ...x,
+                  outputExt: effectiveOutputExt,
+                  convertedBlob: blob,
+                  progress: 100,
+                  status: "success",
+                }
               : x
           )
         );
-        if (!proUser) {
+        setBatchProgress(((qi + 1) / queue.length) * 100);
+        if (isFree) {
           consumeConversions(1);
           refreshMembershipUi();
         }
+
+        // Auto-deliver so users get files without an extra click (stagger avoids multi-download blocks).
+        await new Promise((r) => setTimeout(r, qi * 280));
+        await deliverFileBlob(item, blob, effectiveOutputExt);
       } catch (error) {
-        const msg = error instanceof Error ? error.message : "转换失败";
+        const msg = error instanceof Error ? error.message : "Conversion failed";
         setItems((prev) => prev.map((x) => (x.id === item.id ? { ...x, status: "error", error: msg } : x)));
       } finally {
         resolverRef.current.delete(item.id);
       }
     }
-    setIsConverting(false);
-  };
 
-  const triggerDownload = (item: Item) => {
-    if (!item.convertedBlob) return;
-    const mime = mimeForOutput(item.kind, item.outputExt);
-    const blob =
-      item.convertedBlob.type && item.convertedBlob.type !== "application/octet-stream"
-        ? item.convertedBlob
-        : new Blob([item.convertedBlob], { type: mime });
-    downloadBlob(blob, renameExt(item.file.name, item.outputExt));
+    batchCtxRef.current = null;
+    setBatchProgress(100);
+    setIsConverting(false);
   };
 
   const zipAll = async () => {
@@ -426,6 +602,7 @@ export default function Home() {
     if (!done.length) return;
     setIsZipping(true);
     try {
+      const { default: JSZip } = await import("jszip");
       const zip = new JSZip();
       done.forEach((x) => {
         const mime = mimeForOutput(x.kind, x.outputExt);
@@ -436,6 +613,18 @@ export default function Home() {
         zip.file(renameExt(x.file.name, x.outputExt), blob);
       });
       const zipped = await zip.generateAsync({ type: "blob" });
+      if (outputDirHandle) {
+        try {
+          await saveBlobToDirectory(zipped, "all-converted-files.zip", outputDirHandle);
+          return;
+        } catch (e) {
+          window.alert(
+            e instanceof Error
+              ? `Could not write ZIP to selected folder (${e.message}). Falling back to browser download.`
+              : "Could not write ZIP to selected folder. Falling back to browser download."
+          );
+        }
+      }
       downloadBlob(zipped, "all-converted-files.zip");
     } finally {
       setIsZipping(false);
@@ -443,57 +632,117 @@ export default function Home() {
   };
 
   const statusLabel = (s: ConvertStatus) => {
-    if (s === "queued") return "排队中";
-    if (s === "converting") return "转换中";
-    if (s === "success") return "转换成功";
-    return "转换失败";
+    if (s === "queued") return "Queued";
+    if (s === "converting") return "Converting";
+    if (s === "success") return "Done";
+    return "Failed";
   };
 
-  const activatePro = () => {
-    savePlanToStorage("pro");
-    refreshMembershipUi();
+  const promptUpgradeToPricing = () => {
+    const shouldGo = window.confirm(
+      "Free plan supports up to 5 files per batch. Go to Pricing to upgrade?"
+    );
+    if (shouldGo) {
+      router.push("/pricing");
+    }
   };
 
   return (
-    <div className="min-h-screen bg-[#06080f] px-4 py-10 text-white sm:px-6 lg:px-8">
+    <>
       <PaymentModal
         open={paymentOpen}
         onClose={() => setPaymentOpen(false)}
-        onSimulateSuccess={() => {
-          activatePro();
+        selectedTier={selectedUpgradeTier}
+        onProUnlocked={async (tier) => {
+          await updateSession();
+          if (sessionStatus !== "authenticated") {
+            savePlanToStorage(tier);
+          }
           setPaymentOpen(false);
         }}
       />
 
+      <AdShell>
       <div className="mx-auto mb-6 flex max-w-6xl flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
         <div className="flex flex-wrap items-center gap-3">
           <span className="font-medium">
-            今日剩余次数：<strong className="text-white">{proUser ? "∞（Pro）" : `${remainingToday} 次`}</strong>
+            Conversions today: <strong className="text-white">Unlimited</strong>
           </span>
           <span className="hidden text-slate-400 sm:inline">|</span>
           <span className="text-slate-300">
-            单文件上限：<strong className="text-white">{size(maxBytes)}</strong>
-            {proUser ? " · Pro" : " · 游客"}
+            Max file size: <strong className="text-white">{size(maxBytes)}</strong>
+            {isMax ? " · Max" : isPro ? " · Pro" : " · Free"}
           </span>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {sessionStatus === "authenticated" ? (
+            <>
+              <span className="hidden text-xs text-slate-400 sm:inline">
+                {session?.user?.email}
+              </span>
+              {session?.user?.planExpiresAt && activePlan !== "free" ? (
+                <span className="text-xs text-slate-400">
+                  Until{" "}
+                  {new Date(session.user.planExpiresAt).toLocaleDateString(undefined, {
+                    dateStyle: "medium",
+                  })}
+                </span>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => void signOut({ callbackUrl: "/" })}
+                className="rounded-lg border border-white/20 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-white/10"
+              >
+                Sign out
+              </button>
+            </>
+          ) : (
+            <>
+              <Link
+                href="/login"
+                className="rounded-lg border border-white/20 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-white/10"
+              >
+                Sign in
+              </Link>
+              <Link
+                href="/register"
+                className="rounded-lg border border-white/20 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-white/10"
+              >
+                Register
+              </Link>
+            </>
+          )}
           <Link
             href="/pricing"
             className="rounded-lg border border-white/20 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-white/10"
           >
-            定价方案
+            Pricing
           </Link>
-          {!proUser ? (
+          {!isPaid ? (
             <button
               type="button"
-              onClick={() => setPaymentOpen(true)}
+              onClick={() => {
+                setSelectedUpgradeTier("pro");
+                setPaymentOpen(true);
+              }}
               className="rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-semibold text-slate-950 transition hover:bg-sky-400"
             >
               Upgrade to Pro
             </button>
+          ) : !isMax ? (
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedUpgradeTier("max");
+                setPaymentOpen(true);
+              }}
+              className="rounded-lg bg-violet-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-violet-400"
+            >
+              Upgrade to Max
+            </button>
           ) : (
             <span className="rounded-lg bg-emerald-500/20 px-3 py-1.5 text-xs font-medium text-emerald-300">
-              Pro 已解锁
+              Max unlocked
             </span>
           )}
         </div>
@@ -503,48 +752,98 @@ export default function Home() {
         <section className="rounded-3xl border border-white/10 bg-gradient-to-b from-[#0e1423] to-[#090d17] p-8 shadow-2xl shadow-black/30">
           <div className="mb-8 flex items-center gap-3 text-sky-300">
             <Zap className="h-5 w-5" />
-            <span className="text-sm uppercase tracking-[0.24em] text-sky-200/80">Pro Local Converter</span>
+            <span className="text-sm uppercase tracking-[0.2em] text-sky-200/80 sm:tracking-[0.24em]">
+              Goldfish Format Converter
+            </span>
           </div>
-          <h1 className="text-4xl font-semibold tracking-tight sm:text-5xl">Ultimate Media Converter</h1>
-          <p className="mt-3 text-slate-300">全部转换在浏览器本地完成，不上传服务器。</p>
+          <h1 className="text-4xl font-semibold tracking-tight sm:text-5xl">Local media converter</h1>
+          <p className="mt-3 text-slate-300">
+            Everything runs in your browser — your files never upload to our servers.
+          </p>
 
           <div className="mt-8 grid gap-4 sm:grid-cols-3">
             <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-              <p className="text-xs uppercase text-slate-400">队列</p>
+              <p className="text-xs uppercase text-slate-400">Queue</p>
               <p className="mt-1 text-2xl font-semibold">{items.length}</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-              <p className="text-xs uppercase text-slate-400">完成</p>
+              <p className="text-xs uppercase text-slate-400">Done</p>
               <p className="mt-1 text-2xl font-semibold text-emerald-300">{totalDone}</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-              <p className="text-xs uppercase text-slate-400">引擎状态</p>
+              <p className="text-xs uppercase text-slate-400">Engine</p>
               <p className="mt-1 text-sm text-slate-200">
-                {workerReady ? "FFmpeg Worker 已就绪 (SharedArrayBuffer)" : "待加载"}
+                {workerReady ? "FFmpeg worker ready (SharedArrayBuffer)" : "Loading…"}
               </p>
             </div>
           </div>
 
           <div className="mt-6 flex flex-wrap items-center gap-3">
             <div className="rounded-xl border border-sky-400/40 bg-sky-500/10 px-4 py-2 text-sm text-sky-100">
-              已自动识别格式；每张卡片内选择转出格式
+              Formats detected automatically — pick output format on each card
             </div>
             <label className="ml-auto flex items-center gap-2 rounded-xl border border-white/15 bg-slate-900/60 px-3 py-2 text-sm text-slate-200">
-              视频转码档位
+              Video quality
               <select
-                value={proUser ? videoPreset : "fast"}
+                value={isMax ? "high" : isPro ? videoPreset : "fast"}
                 onChange={(e) => setVideoPreset(e.target.value as VideoQualityPreset)}
-                disabled={!proUser}
+                disabled={!isPaid || isMax}
                 className="rounded-md border border-white/20 bg-[#0c111d] px-2 py-1 outline-none disabled:cursor-not-allowed disabled:opacity-60"
               >
-                <option value="fast">极速</option>
-                <option value="standard">标准（Pro）</option>
-                <option value="high">高质量 / 高清（Pro）</option>
+                <option value="fast">Fast</option>
+                <option value="standard">Standard (Pro)</option>
+                <option value="high">High quality (Max)</option>
               </select>
             </label>
           </div>
-          {!proUser ? (
-            <p className="mt-2 text-xs text-slate-500">游客仅可使用「极速」视频转码；升级 Pro 解锁标准与高清参数。</p>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            {canPickDirectory ? (
+              <>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      const handle = await pickSaveDirectory();
+                      if (handle) setOutputDirHandle(handle);
+                    } catch (e) {
+                      window.alert(
+                        e instanceof Error ? `Folder selection canceled: ${e.message}` : "Folder selection canceled."
+                      );
+                    }
+                  }}
+                  className="rounded-lg border border-white/20 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-white/10"
+                >
+                  Choose output folder
+                </button>
+                {outputDirHandle ? (
+                  <button
+                    type="button"
+                    onClick={() => setOutputDirHandle(null)}
+                    className="rounded-lg border border-white/20 px-3 py-1.5 text-xs font-medium text-slate-300 transition hover:bg-white/10"
+                  >
+                    Clear folder
+                  </button>
+                ) : null}
+                <span className="text-xs text-slate-500">
+                  {outputDirHandle
+                    ? `Saving downloads to: ${outputDirHandle.name ?? "selected folder"}`
+                    : "No folder selected: browser default download location will be used."}
+                </span>
+              </>
+            ) : (
+              <span className="text-xs text-slate-500">
+                Custom output folder is not supported by this browser. Downloads will use browser default location.
+              </span>
+            )}
+          </div>
+          {!isPaid ? (
+            <p className="mt-2 text-xs text-slate-500">
+              Free: up to 100MB per file, batch up to 5. Visit Pricing to unlock more.
+            </p>
+          ) : isPro ? (
+            <p className="mt-2 text-xs text-slate-500">Pro: up to 500MB per file, batch up to 10.</p>
+          ) : isMax ? (
+            <p className="mt-2 text-xs text-slate-500">Max: highest priority and no practical size limit.</p>
           ) : null}
 
           <button
@@ -567,10 +866,12 @@ export default function Home() {
             }`}
           >
             <UploadCloud className="h-12 w-12 text-sky-300" />
-            <p className="text-lg font-medium">拖拽上传或点击选择文件</p>
-            <p className="text-sm text-slate-400">支持 PDF、音视频与主流图片；PDF 可通过文件头识别</p>
+            <p className="text-lg font-medium">Drag & drop or click to add files</p>
+            <p className="text-sm text-slate-400">
+              Images, audio, video, PDFs, Office, CSV, and plain text — pick the output format on each card.
+            </p>
           </button>
-          <input ref={inputRef} type="file" accept={ACCEPTS.join(",")} multiple onChange={onInput} className="hidden" />
+          <input ref={inputRef} type="file" accept={buildAcceptAttribute()} multiple onChange={onInput} className="hidden" />
 
           <div className="mt-6 flex flex-wrap gap-3">
             <button
@@ -580,7 +881,7 @@ export default function Home() {
               className="inline-flex items-center gap-2 rounded-xl bg-emerald-500 px-4 py-2 text-sm font-medium text-black disabled:opacity-50"
             >
               {isConverting || engineLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />}
-              全部转换
+              Convert all
             </button>
             <button
               type="button"
@@ -589,19 +890,37 @@ export default function Home() {
               className="inline-flex items-center gap-2 rounded-xl bg-sky-500 px-4 py-2 text-sm font-medium text-black disabled:opacity-50"
             >
               <Download className="h-4 w-4" />
-              {isZipping ? "打包中..." : "一键打包下载 (JSZip)"}
+              {isZipping ? "Zipping…" : "Download all as ZIP"}
             </button>
             <button
               type="button"
               onClick={() => void mergePdfs()}
-              disabled={mergeBusy || pdfItems.length < 2 || !proUser}
-              title={!proUser ? "升级 Pro 解锁 PDF 批量合并" : undefined}
+              disabled={mergeBusy || pdfItems.length < 2 || !isPaid}
+              title={!isPaid ? "Upgrade to Pro to merge PDFs" : undefined}
               className="inline-flex items-center gap-2 rounded-xl border border-violet-400/50 bg-violet-500/15 px-4 py-2 text-sm font-medium text-violet-100 disabled:opacity-50"
             >
               {mergeBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Layers className="h-4 w-4" />}
-              PDF 批量合并（Pro）
+              Merge PDFs (Pro)
             </button>
           </div>
+          <p className="mt-3 text-xs text-slate-500">
+            After conversion, files download automatically (or save to your chosen folder — no download bar in that case).
+          </p>
+
+          {isConverting ? (
+            <div className="mt-4 rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-4 py-3">
+              <div className="mb-2 flex justify-between text-xs text-emerald-100/90">
+                <span>Overall batch progress</span>
+                <span>{Math.round(batchProgress)}%</span>
+              </div>
+              <div className="h-2 w-full overflow-hidden rounded-full bg-slate-800">
+                <div
+                  className="h-full rounded-full bg-emerald-400 transition-[width] duration-300"
+                  style={{ width: `${Math.min(100, batchProgress)}%` }}
+                />
+              </div>
+            </div>
+          ) : null}
         </section>
 
         <section className="mt-8 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -615,6 +934,14 @@ export default function Home() {
                     <FileAudio2 className="h-4 w-4 shrink-0" />
                   ) : item.kind === "video" ? (
                     <FileVideo className="h-4 w-4 shrink-0" />
+                  ) : item.kind === "office" ? (
+                    item.officeSubtype === "excel" ? (
+                      <FileSpreadsheet className="h-4 w-4 shrink-0 text-emerald-300" />
+                    ) : item.officeSubtype === "text" ? (
+                      <FileText className="h-4 w-4 shrink-0 text-amber-300" />
+                    ) : (
+                      <FileText className="h-4 w-4 shrink-0 text-sky-300" />
+                    )
                   ) : (
                     <FileText className="h-4 w-4 shrink-0" />
                   )}
@@ -631,67 +958,122 @@ export default function Home() {
                   src={item.previewUrl}
                   className="h-40 w-full rounded-xl border border-white/10 bg-white"
                 />
+              ) : item.kind === "office" ? (
+                <div className="flex h-40 flex-col items-center justify-center rounded-xl border border-white/10 text-slate-400">
+                  <span className="text-lg font-medium text-slate-300">
+                    {item.officeSubtype === "excel"
+                      ? "Spreadsheet"
+                      : item.officeSubtype === "text"
+                        ? "Plain text / Markdown"
+                        : "Word"}
+                  </span>
+                  <span className="mt-1 text-xs">Processed locally in your browser</span>
+                </div>
               ) : (
                 <div className="flex h-40 items-center justify-center rounded-xl border border-white/10 text-slate-400">
                   {item.kind.toUpperCase()}
                 </div>
               )}
               <div className="mt-3 text-sm text-slate-300">
-                <p>输入：{extOf(item.file.name).toUpperCase() || (item.kind === "pdf" ? "PDF" : "UNKNOWN")}</p>
-                <p>原始大小：{size(item.file.size)}</p>
-                <p>转换后：{item.convertedBlob ? size(item.convertedBlob.size) : "--"}</p>
+                <p>In: {extOf(item.file.name).toUpperCase() || (item.kind === "pdf" ? "PDF" : "UNKNOWN")}</p>
+                <p>Original: {size(item.file.size)}</p>
+                <p>Output: {item.convertedBlob ? size(item.convertedBlob.size) : "—"}</p>
                 {item.error ? <p className="text-red-300">{item.error}</p> : null}
               </div>
-              <label className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-white/15 bg-slate-900/60 px-3 py-2 text-sm">
-                <span className="text-slate-200">转出格式</span>
-                <select
-                  value={item.outputExt}
-                  onChange={(e) => {
-                    const value = e.target.value;
-                    setItems((prev) =>
-                      prev.map((x) =>
-                        x.id === item.id
-                          ? {
-                              ...x,
-                              outputExt: value,
-                              status: x.status === "converting" ? x.status : "queued",
-                              progress: x.status === "converting" ? x.progress : 0,
-                              convertedBlob: undefined,
-                              error: undefined,
-                            }
-                          : x
-                      )
-                    );
-                  }}
-                  disabled={item.status === "converting"}
-                  className="rounded-md border border-white/20 bg-[#0c111d] px-2 py-1 outline-none disabled:opacity-60"
-                >
-                  {outputOptionsForKind(item.kind).map((ext) => (
-                    <option key={ext} value={ext}>
-                      {ext.toUpperCase()}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              {item.kind === "pdf" ? (
+                <label className="mt-3 flex flex-col gap-2 rounded-lg border border-white/15 bg-slate-900/60 px-3 py-2 text-sm">
+                  <span className="text-slate-200">PDF processing</span>
+                  <select
+                    value={item.pdfOperation ?? "convert"}
+                    onChange={(e) => {
+                      const op = e.target.value as PdfOperation;
+                      const nextExt = pdfToolOutputExt(op);
+                      setItems((prev) =>
+                        prev.map((x) =>
+                          x.id === item.id
+                            ? {
+                                ...x,
+                                pdfOperation: op,
+                                outputExt: nextExt,
+                                status: x.status === "converting" ? x.status : "queued",
+                                progress: x.status === "converting" ? x.progress : 0,
+                                convertedBlob: undefined,
+                                error: undefined,
+                              }
+                            : x
+                        )
+                      );
+                    }}
+                    disabled={item.status === "converting"}
+                    className="rounded-md border border-white/20 bg-[#0c111d] px-2 py-1 text-xs outline-none disabled:opacity-60 sm:text-sm"
+                  >
+                    {PDF_TOOL_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-slate-500">
+                    Download extension: <strong className="text-slate-300">{item.outputExt}</strong>
+                  </p>
+                </label>
+              ) : (
+                <label className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-white/15 bg-slate-900/60 px-3 py-2 text-sm">
+                  <span className="text-slate-200">Output format</span>
+                  <select
+                    value={item.outputExt}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setItems((prev) =>
+                        prev.map((x) =>
+                          x.id === item.id
+                            ? {
+                                ...x,
+                                outputExt: value,
+                                status: x.status === "converting" ? x.status : "queued",
+                                progress: x.status === "converting" ? x.progress : 0,
+                                convertedBlob: undefined,
+                                error: undefined,
+                              }
+                            : x
+                        )
+                      );
+                    }}
+                    disabled={item.status === "converting"}
+                    className="max-w-[min(100%,220px)] rounded-md border border-white/20 bg-[#0c111d] px-2 py-1 text-xs outline-none disabled:opacity-60 sm:max-w-none sm:text-sm"
+                  >
+                    {outputGroupsForKind(item.kind, item.officeSubtype).map((group) => (
+                      <optgroup key={group.label} label={group.label}>
+                        {group.options.map((o) => (
+                          <option key={o.value} value={o.value}>
+                            {o.label}
+                          </option>
+                        ))}
+                      </optgroup>
+                    ))}
+                  </select>
+                </label>
+              )}
               {item.status === "converting" ? (
                 <div>
                   <CircularProgress progress={item.progress} />
-                  <p className="mt-1 text-center text-xs text-slate-500">环形进度</p>
+                  <p className="mt-1 text-center text-xs text-slate-500">Progress</p>
                 </div>
               ) : null}
               <button
                 type="button"
-                onClick={() => triggerDownload(item)}
+                onClick={() => void triggerDownload(item)}
                 disabled={!item.convertedBlob}
                 className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-xl border border-white/15 px-3 py-2 text-sm disabled:opacity-50"
               >
                 <Download className="h-4 w-4" />
-                下载
+                Download
               </button>
             </article>
           ))}
         </section>
       </main>
-    </div>
+      </AdShell>
+    </>
   );
 }

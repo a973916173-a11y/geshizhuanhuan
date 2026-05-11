@@ -20,6 +20,9 @@
 # production
 /build
 
+# sqlite local db
+/dev.db
+
 # misc
 .DS_Store
 *.pem
@@ -33,9 +36,16 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 
+# Neon API key for deploy script (never commit)
+neon.keys.env
+
 # vercel
 .vercel
 
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+.vercel
+
+/src/generated/prisma
