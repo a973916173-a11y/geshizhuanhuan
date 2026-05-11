@@ -16,8 +16,12 @@ const googleConfigured =
   Boolean(process.env.GOOGLE_CLIENT_SECRET?.trim());
 
 function githubClientCredentials(): { id: string; secret: string } | null {
-  const id = process.env.GITHUB_ID?.trim();
-  const secret = process.env.GITHUB_SECRET?.trim();
+  const id =
+    process.env.GITHUB_ID?.trim() ||
+    process.env.AUTH_GITHUB_ID?.trim();
+  const secret =
+    process.env.GITHUB_SECRET?.trim() ||
+    process.env.AUTH_GITHUB_SECRET?.trim();
   if (!id || !secret) return null;
   return { id, secret };
 }

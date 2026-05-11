@@ -1,0 +1,11 @@
+---
+description: Vercel deployment target for this repo (avoid wrong project)
+alwaysApply: true
+---
+
+# Vercel project for `webp-tool` / `geshizhuanhuan`
+
+- **Production site:** `https://geshizhuanhuan-three.vercel.app`
+- **Correct Vercel project name:** `geshizhuanhuan` (under scope `a973916173-3801s-projects`).
+- **Do not** deploy to or create a separate project named `webp-tool` unless the user explicitly asks. CLI deploys must use `vercel link` → project **`geshizhuanhuan`**, then `vercel deploy --prod`.
+- GitHub repo: `a973916173-a11y/geshizhuanhuan` — pushes to `main` should trigger this same Vercel project when Git integration is connected.
