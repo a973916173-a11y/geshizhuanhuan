@@ -14,26 +14,17 @@ export function AdShell({ children }: { children: React.ReactNode }) {
       <div className="mx-auto max-w-[1600px] px-4 py-10 sm:px-6 lg:px-8">
         <div className="flex flex-col gap-8 xl:flex-row xl:items-start xl:gap-6">
           <aside className="hidden w-44 shrink-0 xl:block xl:sticky xl:top-6 xl:self-start">
-            <p className="mb-2 rounded-md border border-amber-400/40 bg-amber-500/10 px-2 py-1 text-center text-[11px] font-medium uppercase tracking-wide text-amber-200">
-              Ad Space for Rent
-            </p>
             <AdComponent slot={ADSENSE_SLOTS.railLeft} format="vertical" className="w-full" />
           </aside>
 
           <div className="min-w-0 flex-1">{children}</div>
 
           <aside className="hidden w-44 shrink-0 xl:block xl:sticky xl:top-6 xl:self-start">
-            <p className="mb-2 rounded-md border border-amber-400/40 bg-amber-500/10 px-2 py-1 text-center text-[11px] font-medium uppercase tracking-wide text-amber-200">
-              Ad Space for Rent
-            </p>
             <AdComponent slot={ADSENSE_SLOTS.railRight} format="vertical" className="w-full" />
           </aside>
         </div>
 
         <footer className="mt-10 w-full border-t border-white/10 pt-8">
-          <p className="mb-2 rounded-md border border-amber-400/40 bg-amber-500/10 px-3 py-1 text-center text-xs font-medium uppercase tracking-wide text-amber-200">
-            Ad Space for Rent
-          </p>
           <AdComponent slot={ADSENSE_SLOTS.footer} format="horizontal" />
         </footer>
       </div>
