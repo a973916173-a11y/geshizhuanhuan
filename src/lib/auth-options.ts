@@ -15,13 +15,25 @@ const googleConfigured =
   Boolean(process.env.GOOGLE_CLIENT_ID?.trim()) &&
   Boolean(process.env.GOOGLE_CLIENT_SECRET?.trim());
 
+function cleanEnv(value?: string): string {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) return "";
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
+}
+
 function githubClientCredentials(): { id: string; secret: string } | null {
   const id =
-    process.env.GITHUB_ID?.trim() ||
-    process.env.AUTH_GITHUB_ID?.trim();
+    cleanEnv(process.env.GITHUB_ID) ||
+    cleanEnv(process.env.AUTH_GITHUB_ID);
   const secret =
-    process.env.GITHUB_SECRET?.trim() ||
-    process.env.AUTH_GITHUB_SECRET?.trim();
+    cleanEnv(process.env.GITHUB_SECRET) ||
+    cleanEnv(process.env.AUTH_GITHUB_SECRET);
   if (!id || !secret) return null;
   return { id, secret };
 }
