@@ -45,10 +45,10 @@ export default function AdComponent({
   if (isPlaceholderSlot) {
     return (
       <div
-        className={`relative overflow-hidden rounded-xl border border-amber-400/40 bg-amber-500/10 ${formatClassMap[format]} ${className ?? ""}`}
+        className={`relative overflow-hidden rounded-xl border border-amber-300/40 bg-transparent ${formatClassMap[format]} ${className ?? ""}`}
       >
         <div className="absolute inset-0 flex items-center justify-center px-3 text-center">
-          <span className="rounded-md border border-amber-300/60 bg-[#0c111d]/70 px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-amber-200">
+          <span className="rounded-md border border-amber-300/60 bg-transparent px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-amber-200">
             Ad Space for Rent
           </span>
         </div>

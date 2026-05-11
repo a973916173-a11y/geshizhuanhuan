@@ -50,6 +50,7 @@ export function LoginForm() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [oauthBusyId, setOauthBusyId] = useState<string | null>(null);
   const [providers, setProviders] = useState<Record<string, ClientSafeProvider> | null>(null);
 
   useEffect(() => {
@@ -85,6 +86,24 @@ export function LoginForm() {
     }
   }
 
+  async function onOAuth(providerId: string) {
+    setError(null);
+    setOauthBusyId(providerId);
+    try {
+      const res = await signIn(providerId, { callbackUrl, redirect: false });
+      if (res?.url) {
+        window.location.assign(res.url);
+        return;
+      }
+      // Fallback for environments where signIn() doesn't return url reliably.
+      window.location.assign(
+        `/api/auth/signin/${providerId}?callbackUrl=${encodeURIComponent(callbackUrl)}`
+      );
+    } finally {
+      setOauthBusyId(null);
+    }
+  }
+
   return (
     <div className="min-h-screen bg-[#06080f] px-4 py-16 text-white">
       <div className="mx-auto max-w-md rounded-2xl border border-white/10 bg-[#0c111d] p-8 shadow-xl">
@@ -103,24 +122,15 @@ export function LoginForm() {
         ) : (
           <div className="mt-8 flex flex-col gap-3">
             {oauthList.map((provider) => (
-              provider.id === "github" ? (
-                <a
-                  key={provider.id}
-                  href={`/api/auth/signin/github?callbackUrl=${encodeURIComponent(callbackUrl)}`}
-                  className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition ${providerButtonClass(provider.id)}`}
-                >
-                  {providerLabel(provider.id, provider.name)}
-                </a>
-              ) : (
-                <button
-                  key={provider.id}
-                  type="button"
-                  className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition ${providerButtonClass(provider.id)}`}
-                  onClick={() => void signIn(provider.id, { callbackUrl })}
-                >
-                  {providerLabel(provider.id, provider.name)}
-                </button>
-              )
+              <button
+                key={provider.id}
+                type="button"
+                disabled={oauthBusyId !== null}
+                className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition disabled:opacity-70 ${providerButtonClass(provider.id)}`}
+                onClick={() => void onOAuth(provider.id)}
+              >
+                {oauthBusyId === provider.id ? "Redirecting…" : providerLabel(provider.id, provider.name)}
+              </button>
             ))}
           </div>
         )}
