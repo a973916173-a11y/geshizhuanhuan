@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "prisma migrate deploy && next build",
+    "build": "node scripts/build-vercel.cjs",
     "build:next": "next build",
     "deploy:production": "node scripts/neon-bootstrap.cjs",
     "start": "next start",

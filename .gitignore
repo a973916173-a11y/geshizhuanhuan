@@ -46,6 +46,4 @@ neon.keys.env
 *.tsbuildinfo
 next-env.d.ts
 
-.vercel
-
 /src/generated/prisma
